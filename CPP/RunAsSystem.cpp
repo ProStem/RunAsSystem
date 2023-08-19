@@ -1,6 +1,4 @@
-
 // RunAsSystem - RunAsSystem.cpp - by Michael Badichi
-
 
 #include <Windows.h>
 #include <Psapi.h>
@@ -8,78 +6,69 @@
 #include <Shlwapi.h>
 #include <sstream>
 
+
 #pragma comment (lib, "Psapi")
 #pragma comment (lib, "UserEnv")
 #pragma comment (lib, "Shlwapi")
 
-
-bool _SetPrivilege(std::wstring Privilege)
+void _SetPrivilege()
 {
-    bool retCode = false;
-    HANDLE curProc = GetCurrentProcess();
-    HANDLE hToken;
-    if (OpenProcessToken(curProc, TOKEN_ALL_ACCESS, &hToken))
+    HANDLE currentProcess = GetCurrentProcess();
+    HANDLE tokenHandle;
+    if (OpenProcessToken(currentProcess, TOKEN_ALL_ACCESS, &tokenHandle))
     {
         TOKEN_PRIVILEGES tp;
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        LookupPrivilegeValue(L"", Privilege.c_str(), &tp.Privileges[0].Luid);
-        TOKEN_PRIVILEGES tpout;
-        DWORD retLen = 0;
-        BOOL stat = AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tpout), &tpout, &retLen);
-        DWORD lasterr = GetLastError();
-        CloseHandle(hToken);
-        retCode = (stat == TRUE);
+        LookupPrivilegeValue(NULL, L"SeDebugPrivilege", &tp.Privileges[0].Luid);
+        BOOL stat = AdjustTokenPrivileges(tokenHandle, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL);
+        CloseHandle(tokenHandle);
     }
-    return retCode;
 }
-
 
 bool IsProcessIdMatchingName(DWORD processID, std::wstring name)
 {
-    bool retCode = false;
-    WCHAR szProcessName[MAX_PATH] = L"<unknown>";
+    bool isMatchingName = false;
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processID);
     if (hProcess)
     {
         WCHAR path[MAX_PATH + FILENAME_MAX + 1];
         if (GetProcessImageFileName(hProcess, path, sizeof(path) / sizeof(path[0])))
         {
-            WCHAR* fname = StrRChr(path, NULL, L'\\');
-            if (fname)
+            WCHAR* fileName = StrRChr(path, NULL, L'\\');
+            if (fileName)
             {
-                fname++;
-                retCode = (_wcsicmp(fname, name.c_str()) == 0);
+                fileName++;
+                isMatchingName = (_wcsicmp(fileName, name.c_str()) == 0);
             }
         }
         CloseHandle(hProcess);
     }
-    return retCode;
+    return isMatchingName;
 }
-
 
 DWORD GetProcessIdByName(std::wstring name, DWORD sessionID)
 {
-    DWORD retCode = 0;
-    DWORD aProcesses[16 * 1024];
-    DWORD cbNeeded;
+    DWORD processID = 0;
+    DWORD processesIDArray[16 * 1024];
+    DWORD arrayLength;
     unsigned int i;
-    if (EnumProcesses(aProcesses, sizeof(aProcesses), &cbNeeded))
+    if (EnumProcesses(processesIDArray, sizeof(processesIDArray), &arrayLength))
     {
-        DWORD cProcesses = cbNeeded / sizeof(DWORD);
-        for (i = 0; i < cProcesses; i++)
+        DWORD processCount = arrayLength / sizeof(DWORD);
+        for (i = 0; i < processCount; i++)
         {
-            if (aProcesses[i] != 0)
+            if (processesIDArray[i] != 0)
             {
-                if (IsProcessIdMatchingName(aProcesses[i], name))
+                if (IsProcessIdMatchingName(processesIDArray[i], name))
                 {
                     DWORD sesID = 0;
-                    if (ProcessIdToSessionId(aProcesses[i], &sesID))
+                    if (ProcessIdToSessionId(processesIDArray[i], &sesID))
                     {
                         if (sesID == sessionID)
                         {
                             //found it
-                            retCode = aProcesses[i];
+                            processID = processesIDArray[i];
                             break;
                         }
                     }
@@ -87,46 +76,37 @@ DWORD GetProcessIdByName(std::wstring name, DWORD sessionID)
             }
         }
     }
-    return retCode;
+    return processID;
 }
-
 
 void RunAsSystem(const WCHAR* cmd_, DWORD* procDoneRetCode_ = NULL)
 {
     std::wstring cmd = cmd_ ? cmd_ : L"";
-    bool retCode = false;
-    WCHAR* winlogon = L"winlogon.exe";
-    WCHAR* privileges[] = {
-        L"SeDebugPrivilege",
-        L"SeAssignPrimaryTokenPrivilege",
-        L"SeIncreaseQuotaPrivilege"
-    };
+    WCHAR* targetProcess = L"winlogon.exe";
 
-    for (int i = 0; i < sizeof(privileges) / sizeof(privileges[0]); i++) {
-        _SetPrivilege(privileges[i]);
-    }
+    _SetPrivilege();
 
     DWORD sessionID = WTSGetActiveConsoleSessionId();
     if (sessionID != 0xFFFFFFFF)
     {
-        DWORD processId = GetProcessIdByName(winlogon, sessionID);
+        DWORD processId = GetProcessIdByName(targetProcess, sessionID);
         if (processId)
         {
-            HANDLE hProc = OpenProcess(0x001F0FFF, FALSE, processId);
-            if (hProc != NULL)
+            HANDLE targetProcessHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
+            if (targetProcessHandle != NULL)
             {
-                HANDLE hToken;
-                if (OpenProcessToken(hProc, TOKEN_DUPLICATE, &hToken))
+                HANDLE targetProcessToken;
+                if (OpenProcessToken(targetProcessHandle, TOKEN_DUPLICATE, &targetProcessToken))
                 {
-                    HANDLE hDupToken;
-                    if (DuplicateTokenEx(hToken, 0x001F0FFF, NULL, SecurityIdentification, TokenPrimary, &hDupToken))
+                    HANDLE impersonationToken;
+                    if (DuplicateTokenEx(targetProcessToken, TOKEN_ALL_ACCESS, NULL, SecurityIdentification, TokenPrimary, &impersonationToken))
                     {
                         STARTUPINFO si = { 0 };
                         PROCESS_INFORMATION pi = { 0 };
                         si.cb = sizeof(si);
                         si.lpDesktop = L"winsta0\\default";
 
-                        typedef BOOL(WINAPI* CreateProcessWithTokenW_proto) (HANDLE hToken, DWORD dwLogonFlags, LPCWSTR lpApplicationName, LPWSTR lpCommandLine, DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation);
+                        typedef BOOL(WINAPI* CreateProcessWithTokenW_proto) (HANDLE targetProcessToken, DWORD dwLogonFlags, LPCWSTR lpApplicationName, LPWSTR lpCommandLine, DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation);
                         CreateProcessWithTokenW_proto CreateProcessWithTokenW_fn = NULL;
                         HMODULE hMod = LoadLibrary(L"ADVAPI32.dll");
                         if (hMod)
@@ -134,16 +114,16 @@ void RunAsSystem(const WCHAR* cmd_, DWORD* procDoneRetCode_ = NULL)
                             CreateProcessWithTokenW_fn = (CreateProcessWithTokenW_proto)GetProcAddress(hMod, "CreateProcessWithTokenW");
                         }
 
-                        if (CreateProcessWithTokenW_fn == NULL || !CreateProcessWithTokenW_fn(hDupToken, LOGON_WITH_PROFILE, NULL, (LPWSTR)cmd.c_str(), NULL, NULL, NULL, &si, &pi))
+                        if (CreateProcessWithTokenW_fn == NULL || !CreateProcessWithTokenW_fn(impersonationToken, LOGON_WITH_PROFILE, NULL, (LPWSTR)cmd.c_str(), NULL, NULL, NULL, &si, &pi))
                         {
                             //failed crating with token, try create as user
-                            CreateProcessAsUserW(hDupToken, NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE, NULL, NULL, NULL, &si, &pi);
+                            CreateProcessAsUserW(impersonationToken, NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE, NULL, NULL, NULL, &si, &pi);
                         }
-                        CloseHandle(hDupToken);
+                        CloseHandle(impersonationToken);
                     }
-                    CloseHandle(hToken);
+                    CloseHandle(targetProcessToken);
                 }
-                CloseHandle(hProc);
+                CloseHandle(targetProcessHandle);
             }
         }
     }
